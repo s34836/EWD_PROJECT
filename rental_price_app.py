@@ -16,6 +16,7 @@ artifacts = load_model()
 model = artifacts['model']
 feature_names = artifacts['feature_names']
 high_premium_districts = artifacts['high_premium_districts']
+standardization_params = artifacts.get('standardization_params', {})
 
 # Create the app
 st.title('Warsaw Rental Price Predictor')
@@ -62,33 +63,47 @@ with st.form("prediction_form"):
     submitted = st.form_submit_button("Predict Price")
 
 if submitted:
-    # Prepare features
-    features = {feature: 0 for feature in feature_names}
+    # Calculate relative floor position
+    relative_floor_position = floor_numeric / building_floors_num if building_floors_num > 0 else 0
     
-    # Basic features
-    features['area'] = area
+    # Prepare features
+    features = {}
+    
+    # Raw features to standardize
+    raw_features = {
+        'area': area,
+        'distance_to_center': distance_to_center,
+        'building_floors_num': building_floors_num,
+        'floor_numeric': floor_numeric,
+        'build_year': build_year,
+        'relative_floor_position': relative_floor_position
+    }
+    
+    # Standardize features
+    for feature, value in raw_features.items():
+        if feature in standardization_params:
+            params = standardization_params[feature]
+            std_feature = f"{feature}_std"
+            features[std_feature] = (value - params['mean']) / params['std']
+    
+    
+    # Regular features
     features['rooms_num'] = rooms_num
-    features['building_floors_num'] = building_floors_num
-    features['build_year'] = build_year
-    features['distance_to_center'] = distance_to_center
-    features['floor_numeric'] = floor_numeric
+    features['is_top_floor'] = 1 if floor_numeric == building_floors_num else 0
     
     # District
     district_col = f'district_{districts}'
-    if district_col in features:
-        features[district_col] = 1
+    for col in feature_names:
+        if col.startswith('district_'):
+            features[col] = 1 if col == district_col else 0
     
     # Building type
-    if building_type == 'Apartment':
-        features['building_type_apartment'] = 1
-    elif building_type == 'Tenement':
-        features['building_type_tenement'] = 1
+    features['building_type_apartment'] = 1 if building_type == 'Apartment' else 0
+    features['building_type_tenement'] = 1 if building_type == 'Tenement' else 0
     
     # Window type
-    if window_type == 'Plastic':
-        features['window_plastic'] = 1
-    elif window_type == 'Wooden':
-        features['window_wooden'] = 1
+    features['window_plastic'] = 1 if window_type == 'Plastic' else 0
+    features['window_wooden'] = 1 if window_type == 'Wooden' else 0
     
     # Agency
     features['user_type_agency'] = 1 if is_agency else 0
@@ -101,18 +116,25 @@ if submitted:
     features['infrastructure_score'] = infrastructure_score
     features['interior_score'] = interior_score
     
-    # Calculate relative floor position
-    features['relative_floor_position'] = floor_numeric / building_floors_num if building_floors_num > 0 else 0
-    
-    # Is top floor
-    features['is_top_floor'] = 1 if floor_numeric == building_floors_num else 0
-    
     # Engineered features
-    features['area_per_room'] = area / max(rooms_num, 1)
-    features['area_distance_interaction'] = area * distance_to_center
+    if 'area_std' in features:
+        features['area_per_room'] = features['area_std'] * max(rooms_num, 1)
+        
+        if 'distance_to_center_std' in features:
+            features['area_distance_interaction'] = features['area_std'] * features['distance_to_center_std']
+    
     features['high_premium_district'] = 1 if district_col in high_premium_districts else 0
-    features['building_age'] = 2025 - build_year
-    features['top_floor_distance'] = building_floors_num - floor_numeric
+    
+    if 'build_year_std' in features:
+        features['building_age'] = features['build_year_std'] * -1
+    
+    if 'building_floors_num_std' in features and 'floor_numeric_std' in features:
+        features['top_floor_distance'] = features['building_floors_num_std'] - features['floor_numeric_std']
+    
+    # Check for missing features
+    for feature in feature_names:
+        if feature not in features:
+            features[feature] = 0
     
     # Make prediction
     input_df = pd.DataFrame([features])[feature_names]
@@ -121,6 +143,31 @@ if submitted:
     price_per_sqm = price_pred / area
     
     # Display results
-    st.success(f"**Estimated Monthly Rent: {price_pred:.2f} PLN**")
-    st.info(f"Price per Square Meter: {price_per_sqm:.2f} PLN/sqm")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.success(f"**Estimated Monthly Rent: {price_pred:.2f} PLN**")
+        st.info(f"Price per Square Meter: {price_per_sqm:.2f} PLN/sqm")
     
+    with col2:
+        # Show some property insights
+        property_insights = []
+        if features.get('high_premium_district', 0) == 1:
+            property_insights.append("Located in a premium district")
+        
+        if premium_amenities_score > 0:
+            property_insights.append("Has premium amenities")
+            
+        if features.get('area_std', 0) > 0:
+            property_insights.append("Above average size")
+        elif features.get('area_std', 0) < -0.5:
+            property_insights.append("Smaller than average")
+            
+        if features.get('build_year_std', 0) > 0.5:
+            property_insights.append("Newer building")
+        elif features.get('build_year_std', 0) < -0.5:
+            property_insights.append("Older building")
+            
+        if property_insights:
+            st.write("**Property Insights:**")
+            for insight in property_insights:
+                st.write(f"- {insight}")
